@@ -17,7 +17,6 @@ class FlaskTracing(opentracing.Tracer):
             self.__tracer = None
             self.__tracer_getter = tracer
         self._trace_all_requests = trace_all_requests
-        self._current_spans = {}
 
         # tracing all requests requires that app != None
         if self._trace_all_requests:
@@ -58,19 +57,6 @@ class FlaskTracing(opentracing.Tracer):
             return wrapper
         return decorator
 
-    def get_span(self, request=None):
-        """
-        Returns the span tracing `request`, or the current request if
-        `request==None`.
-
-        If there is no such span, get_span returns None.
-
-        @param request the request to get the span from
-        """
-        if request is None and stack.top:
-            request = stack.top.request
-        return self._current_spans.get(request, None)
-
     def _before_request_fn(self, attributes):
         request = stack.top.request
         operation_name = request.endpoint
@@ -81,14 +67,13 @@ class FlaskTracing(opentracing.Tracer):
         try:
             span_ctx = self._tracer.extract(opentracing.Format.HTTP_HEADERS,
                                             headers)
-            span = self._tracer.start_span(operation_name=operation_name,
-                                           child_of=span_ctx)
+            scope = self._tracer.start_active_span(operation_name,
+                                                   child_of=span_ctx)
         except (opentracing.InvalidCarrierException,
                 opentracing.SpanContextCorruptedException):
-            span = self._tracer.start_span(operation_name=operation_name)
+            scope = self._tracer.start_active_span(operation_name)
 
-        self._current_spans[request] = span
-
+        span = scope.span
         span.set_tag(tags.COMPONENT, 'Flask')
         span.set_tag(tags.HTTP_METHOD, request.method)
         span.set_tag(tags.HTTP_URL, request.base_url)
@@ -101,13 +86,8 @@ class FlaskTracing(opentracing.Tracer):
                     span.set_tag(attr, payload)
 
     def _after_request_fn(self, response=None):
-        request = stack.top.request
-
-        # the pop call can fail if the request is interrupted by a
-        # `before_request` method so we need a default
-        span = self._current_spans.pop(request, None)
-        if span is not None:
+        scope = self._tracer.scope_manager.active
+        if scope is not None:
             if response is not None:
-                span.set_tag(tags.HTTP_STATUS_CODE, response.status_code)
-
-            span.finish()
+                scope.span.set_tag(tags.HTTP_STATUS_CODE, response.status_code)
+            scope.close()
